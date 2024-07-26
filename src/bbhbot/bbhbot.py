@@ -6,23 +6,35 @@ import configparser
 import time
 import requests
 import sqlite3
+import json
 from datetime import date, datetime, timedelta
+from beem import Hive
+from beem.transactionbuilder import TransactionBuilder
+from beembase.operations import Comment
+from beem.account import Account
 from hiveengine.api import Api
 from hiveengine.wallet import Wallet
+import re
 
 ### Global configuration
 
 BLOCK_STATE_FILE_NAME = 'lastblock.txt'
 
 config = configparser.ConfigParser()
-config.read('../../bbhbot.config')
+config.read('bbhbot.config')
 
 ENABLE_COMMENTS = config['Global']['ENABLE_COMMENTS'] == 'True'
 ENABLE_TRANSFERS = config['HiveEngine']['ENABLE_TRANSFERS'] == 'True'
 
 ACCOUNT_NAME = config['Global']['ACCOUNT_NAME']
 ACCOUNT_POSTING_KEY = config['Global']['ACCOUNT_POSTING_KEY']
-HIVE_API_NODE = config['Global']['HIVE_API_NODE']
+ACCOUNT_ACTIVE_KEY = config['Global']['ACCOUNT_ACTIVE_KEY']
+HIVE_API_NODES = [
+    config['Global']['HIVE_API_NODE'],
+    'https://api.hive.blog',
+    'https://anyx.io',
+    'https://api.openhive.network'
+]
 setApi = Api(url="https://api.primersion.com/")
 TOKEN_NAME = config['HiveEngine']['TOKEN_NAME']
 BOT_COMMAND_STR = config['Global']['BOT_COMMAND_STR']
@@ -38,10 +50,10 @@ for section in config.keys():
         print('%s : %s = %s' % (section, key, config[section][key]))
 
 # Markdown templates for comments
-comment_fail_template = jinja2.Template(open(os.path.join('../../templates', 'comment_fail.template'), 'r').read())
-comment_outofstock_template = jinja2.Template(open(os.path.join('../../templates', 'comment_outofstock.template'), 'r').read())
-comment_success_template = jinja2.Template(open(os.path.join('../../templates', 'comment_success.template'), 'r').read())
-comment_daily_limit_template = jinja2.Template(open(os.path.join('../../templates', 'comment_daily_limit.template'), 'r').read())
+comment_fail_template = jinja2.Template(open(os.path.join('templates', 'comment_fail.template'), 'r').read())
+comment_outofstock_template = jinja2.Template(open(os.path.join('templates', 'comment_outofstock.template'), 'r').read())
+comment_success_template = jinja2.Template(open(os.path.join('templates', 'comment_success.template'), 'r').read())
+comment_daily_limit_template = jinja2.Template(open(os.path.join('templates', 'comment_daily_limit.template'), 'r').read())
 
 ### sqlite3 database helpers
 
@@ -78,59 +90,103 @@ def db_count_gifts_unique(date, invoker, recipient):
     return row[0]
 
 def get_dynamic_global_properties():
-    url = f"{HIVE_API_NODE}"
-    payload = {
-        "jsonrpc": "2.0",
-        "method": "condenser_api.get_dynamic_global_properties",
-        "params": [],
-        "id": 1
-    }
-    response = requests.post(url, json=payload)
-    return response.json()['result']
+    for node in HIVE_API_NODES:
+        try:
+            response = requests.post(node, json={
+                "jsonrpc": "2.0",
+                "method": "condenser_api.get_dynamic_global_properties",
+                "params": [],
+                "id": 1
+            })
+            response.raise_for_status()
+            result = response.json()
+            if 'result' in result:
+                return result['result']
+            else:
+                print(f"Unexpected response structure from {node}: {result}")
+        except requests.exceptions.RequestException as e:
+            print(f"Failed to get dynamic global properties from {node}: {e}")
+    return None
+
+def get_latest_block_num():
+    props = get_dynamic_global_properties()
+    return props['head_block_number'] if props else None
 
 def get_block(block_num):
-    url = f"{HIVE_API_NODE}"
-    payload = {
-        "jsonrpc": "2.0",
-        "method": "condenser_api.get_block",
-        "params": [block_num],
-        "id": 1
-    }
-    response = requests.post(url, json=payload)
-    return response.json().get('result', {})
+    for node in HIVE_API_NODES:
+        try:
+            response = requests.post(node, json={
+                "jsonrpc": "2.0",
+                "method": "condenser_api.get_block",
+                "params": [block_num],
+                "id": 1
+            })
+            response.raise_for_status()
+            result = response.json()
+            if 'result' in result:
+                return result['result']
+            else:
+                print(f"Unexpected response structure from {node} for block {block_num}: {result}")
+        except requests.exceptions.RequestException as e:
+            print(f"Failed to get block {block_num} from {node}: {e}")
+    return None
 
 def get_comment(author, permlink):
-    url = f"{HIVE_API_NODE}"
-    payload = {
-        "jsonrpc": "2.0",
-        "method": "bridge.get_post",
-        "params": {"author": author, "permlink": permlink},
-        "id": 1
-    }
-    response = requests.post(url, json=payload)
-    return response.json().get('result', {})
+    for node in HIVE_API_NODES:
+        try:
+            response = requests.post(node, json={
+                "jsonrpc": "2.0",
+                "method": "bridge.get_post",
+                "params": {"author": author, "permlink": permlink},
+                "id": 1
+            })
+            response.raise_for_status()
+            result = response.json()
+            if 'result' in result:
+                return result['result']
+            else:
+                print(f"Unexpected response structure from {node} for comment {author}/{permlink}: {result}")
+        except requests.exceptions.RequestException as e:
+            print(f"Failed to get comment {author}/{permlink} from {node}: {e}")
+    return None
 
 def get_replies(author, permlink):
-    url = f"{HIVE_API_NODE}"
-    payload = {
-        "jsonrpc": "2.0",
-        "method": "condenser_api.get_content_replies",
-        "params": [author, permlink],
-        "id": 1
-    }
-    response = requests.post(url, json=payload)
-    return response.json().get('result', [])
+    for node in HIVE_API_NODES:
+        try:
+            response = requests.post(node, json={
+                "jsonrpc": "2.0",
+                "method": "condenser_api.get_content_replies",
+                "params": [author, permlink],
+                "id": 1
+            })
+            response.raise_for_status()
+            result = response.json()
+            if 'result' in result:
+                return result['result']
+            else:
+                print(f"Unexpected response structure from {node} for replies {author}/{permlink}: {result}")
+        except requests.exceptions.RequestException as e:
+            print(f"Failed to get replies for {author}/{permlink} from {node}: {e}")
+    return []
 
 def get_account_posts(account):
-    url = f"{HIVE_API_NODE}"
-    payload = {
-        "jsonrpc": "2.0",
-        "method": "condenser_api.get_discussions_by_author_before_date",
-        "params": [account, "", "1970-01-01T00:00:00", 10],
-        "id": 1
-    }
-    response = requests.post(url, json=payload)
-    return response.json().get('result', [])
+    for node in HIVE_API_NODES:
+        try:
+            response = requests.post(node, json={
+                "jsonrpc": "2.0",
+                "method": "condenser_api.get_discussions_by_author_before_date",
+                "params": [account, "", "1970-01-01T00:00:00", 10],
+                "id": 1
+            })
+            response.raise_for_status()
+            result = response.json()
+            if 'result' in result:
+                return result['result']
+            else:
+                print(f"Unexpected response structure from {node} for account posts {account}: {result}")
+        except requests.exceptions.RequestException as e:
+            print(f"Failed to get account posts for {account} from {node}: {e}")
+    return []
 
 def get_block_number():
     if not os.path.exists(BLOCK_STATE_FILE_NAME):
@@ -151,27 +207,52 @@ def has_already_replied(author, permlink):
             return True
     return False
 
+def generate_valid_permlink(permlink):
+    # Convert to lowercase, replace invalid characters with hyphens
+    permlink = permlink.lower()
+    permlink = re.sub(r'[^a-z0-9-]', '-', permlink)
+    return permlink
+
 def post_comment(parent_author, parent_permlink, author, comment_body):
     if ENABLE_COMMENTS:
         print('Commenting!')
-        url = f"{HIVE_API_NODE}"
-        payload = {
-            "jsonrpc": "2.0",
-            "method": "condenser_api.comment",
-            "params": {
+        hive = Hive(keys=[ACCOUNT_POSTING_KEY])
+        authorperm = generate_valid_permlink('re-' + parent_author + '-' + datetime.now().strftime("%Y%m%dT%H%M%S"))
+        comment_op = Comment(
+            **{
                 "parent_author": parent_author,
                 "parent_permlink": parent_permlink,
-                "author": author,
-                "permlink": "re-" + parent_permlink,
-                "title": "",
+                "author": ACCOUNT_NAME,
+                "permlink": authorperm,
+                "title": '',
                 "body": comment_body,
-                "json_metadata": ""
-            },
-            "id": 1
-        }
-        response = requests.post(url, json=payload)
-        print(response.json())
-        time.sleep(3)  # sleep 3s before continuing
+                "json_metadata": {}
+            }
+        )
+        print('CommentDets:')
+        print(comment_op)
+        print('***********')
+        for attempt in range(5):
+            try:
+                tx = TransactionBuilder(blockchain_instance=hive)
+                tx.appendOps(comment_op)
+                tx.appendSigner(ACCOUNT_NAME, 'posting')
+                tx.sign()
+                tx.broadcast()
+                print(f"Comment posted to {parent_author}/{parent_permlink}")
+                return
+            except Exception as e:
+                print(f"Failed to post comment (attempt {attempt + 1}/5): {e}")
+                if 'comment_ptr != nullptr' in str(e):
+                    print(f"The comment with permlink {parent_permlink} does not exist. Skipping.")
+                    return
+                if attempt < 4:
+                    print(f"Retrying in {2 ** attempt} seconds...")
+                    time.sleep(2 ** attempt)
+                    # Switch node
+                    hive.nodes = HIVE_API_NODES[attempt % len(HIVE_API_NODES)]
+                else:
+                    print("Max retries reached. Giving up on posting comment.")
     else:
         print('Debug mode comment:')
         print(comment_body)
@@ -219,10 +300,6 @@ def can_gift(invoker_name, recipient_name):
         return False
     return True
 
-def get_latest_block_num():
-    props = get_dynamic_global_properties()
-    return props['head_block_number']
-
 def stream_comments(start_block=None, sleep_duration=3):
     if start_block is None:
         start_block = get_latest_block_num()
@@ -242,13 +319,116 @@ def stream_comments(start_block=None, sleep_duration=3):
         current_block += 1
         time.sleep(sleep_duration)
 
+def fetch_ref_block_data():
+    for node in HIVE_API_NODES:
+        try:
+            response = requests.post(node, json={
+                "jsonrpc": "2.0",
+                "method": "condenser_api.get_dynamic_global_properties",
+                "params": [],
+                "id": 1
+            })
+            response.raise_for_status()
+            result = response.json()
+            if 'result' in result:
+                head_block_number = result['result']['head_block_number']
+                block_response = requests.post(node, json={
+                    "jsonrpc": "2.0",
+                    "method": "condenser_api.get_block",
+                    "params": [head_block_number],
+                    "id": 1
+                })
+                block_response.raise_for_status()
+                block_result = block_response.json()
+                if 'result' in block_result:
+                    block_id = block_result['result']['block_id']
+                    return head_block_number, block_id
+            else:
+                print(f"Unexpected response structure from {node}: {result}")
+        except requests.exceptions.RequestException as e:
+            print(f"Failed to fetch reference block data from {node}: {e}")
+    return None, None
+
+def sign_and_broadcast_transaction(custom_json_operation):
+    head_block_number, block_id = fetch_ref_block_data()
+    if not head_block_number or not block_id:
+        print("Failed to fetch reference block data. Cannot construct transaction.")
+        return None
+
+    ref_block_num = (head_block_number - 1) & 0xFFFF
+    ref_block_prefix = int(block_id[:8], 16)
+
+    transaction = {
+        "expiration": (datetime.utcnow() + timedelta(minutes=2)).strftime('%Y-%m-%dT%H:%M:%S'),
+        "ref_block_num": ref_block_num,
+        "ref_block_prefix": ref_block_prefix,
+        "operations": [[
+            "custom_json",
+            {
+                "required_auths": [],
+                "required_posting_auths": [ACCOUNT_NAME],
+                "id": "ssc-mainnet-hive",
+                "json": json.dumps(custom_json_operation)
+            }
+        ]],
+        "extensions": []
+    }
+
+    # Sign the transaction
+    tx = TransactionBuilder(transaction, hive_instance=hive)
+    tx.appendSigner(ACCOUNT_NAME, 'posting')
+    tx.sign()
+
+    for i, node in enumerate(HIVE_API_NODES):
+        try:
+            tx.broadcast()
+            print(f"Transaction broadcasted successfully via node {node}")
+            return {"status": "success", "node": node}
+        except Exception as e:
+            print(f"Failed to broadcast transaction to node {node}: {e}")
+
+        # Rotate to the next node
+        if i < len(HIVE_API_NODES) - 1:
+            print(f"Retrying with next node in {2 ** i} seconds...")
+            time.sleep(2 ** i)
+        else:
+            print("All nodes failed. Giving up.")
+            return None
+
+def transfer_token(to_account, amount, token_name, memo):
+    # Prepare the custom JSON operation
+    json_data = {
+        "contractName": "tokens",
+        "contractAction": "transfer",
+        "contractPayload": {
+            "symbol": token_name,
+            "to": to_account,
+            "quantity": f"{amount:.8f}",
+            "memo": memo
+        }
+    }
+    print('TokenDets:')
+    print(json_data)
+    print('***********')
+    # Sign and broadcast the transaction
+    response = sign_and_broadcast_transaction(json_data)
+    if response:
+        print(f"Transaction broadcasted successfully: {response}")
+    else:
+        print("Failed to broadcast transaction.")
+    return response
+
 def main():
     db_create_tables()
     start_block = get_block_number()
     latest_block = get_latest_block_num()
+
+    if latest_block is None:
+        print("Could not retrieve the latest block number. Exiting.")
+        return
+
     max_lag_blocks = 3 * 24 * 60 * 20  # Approximate number of blocks in a week (assuming 3-second block times)
     
-    # If the saved block number is more than 3 days  old, process in batches to catch up --SET TIME above here (7 for a week, 3 for 3 days, right ;-))
     if start_block and latest_block - start_block > max_lag_blocks:
         print(f"Saved block number {start_block} is over 3 days old. Catching up...")
         while start_block < latest_block - max_lag_blocks:
@@ -267,8 +447,12 @@ def process_comment(comment):
     if 'author' not in comment.keys():
         return
     author_account = comment['author']
-    parent_author = comment['parent_author']
+    parent_author = comment.get('parent_author')
+    parent_permlink = comment.get('parent_permlink')
     reply_identifier = '@%s/%s' % (author_account, comment['permlink'])
+    if not parent_author or not parent_permlink:
+        print(f'Not Parent_author or Parent_permlink: {parent_author} / {parent_permlink}')
+        return
     if parent_author == ACCOUNT_NAME:
         message_body = '%s replied with: %s' % (author_account, comment['body'])
     if BOT_COMMAND_STR not in comment['body']:
@@ -277,17 +461,22 @@ def process_comment(comment):
         debug_message = 'Found %s command: https://peakd.com/%s in block %s' % (BOT_COMMAND_STR, reply_identifier, comment['block_num'])
         print(debug_message)
     if author_account == parent_author:
-        return
-    if not parent_author:
+        debug_message = 'Author_account: %s == Parent_author: %s' % (author_account, parent_author)
+        print(debug_message)
         return
     if parent_author == ACCOUNT_NAME:
+        debug_message = 'Parent_author: %s == Accountname: %s' % (parent_author, ACCOUNT_NAME)
+        print(debug_message)
         return
     message_body = '%s asked to send a tip to %s' % (author_account, parent_author)
     try:
         time.sleep(10)
         post = get_comment(author_account, comment['permlink'])
+        if not post:
+            print(f"Parent comment {author_account}/{comment['permlink']} does not exist. Skipping.")
+            return
     except Exception as e:
-        print('post not found or error occurred!', e)
+        print('Post not found or error occurred!', e)
         return
     if has_already_replied(author_account, comment['permlink']):
         print("We already replied!")
@@ -309,7 +498,7 @@ def process_comment(comment):
         else:
             comment_body = comment_fail_template.render(token_name=TOKEN_NAME, target_account=author_account, min_balance=min_balance)
             message_body = '%s tried to send %s but didnt meet requirements.' % (author_account, TOKEN_NAME)
-            post_comment(parent_author, comment['permlink'], ACCOUNT_NAME, comment_body)
+            post_comment(parent_author, parent_permlink, ACCOUNT_NAME, comment_body)
             print(message_body)
         return
     TOKEN_GIFT_AMOUNT = float(config['HiveEngine']['TOKEN_GIFT_AMOUNT'])
@@ -323,22 +512,27 @@ def process_comment(comment):
         message_body = 'Bot wallet has run out of %s' % TOKEN_NAME
         print(message_body)
         comment_body = comment_outofstock_template.render(token_name=TOKEN_NAME)
-        post_comment(parent_author, comment['permlink'], ACCOUNT_NAME, comment_body)
+        post_comment(parent_author, parent_permlink, ACCOUNT_NAME, comment_body)
         return
     if ENABLE_TRANSFERS:
         print('[*] Transfering %f %s from %s to %s' % (TOKEN_GIFT_AMOUNT, TOKEN_NAME, ACCOUNT_NAME, parent_author))
-        bot_wallet.transfer(parent_author, TOKEN_GIFT_AMOUNT, TOKEN_NAME, memo=config['HiveEngine']['TRANSFER_MEMO'])
-        today = str(date.today())
-        db_save_gift(today, author_account, parent_author, comment['block_num'])
-        message_body = 'I sent %f %s to %s' % (TOKEN_GIFT_AMOUNT, TOKEN_NAME, parent_author)
-        print(message_body)
+        try:
+            transfer_token(parent_author, TOKEN_GIFT_AMOUNT, TOKEN_NAME, memo=config['HiveEngine']['TRANSFER_MEMO'])
+            today = str(date.today())
+            db_save_gift(today, author_account, parent_author, comment['block_num'])
+            message_body = 'I sent %f %s to %s' % (TOKEN_GIFT_AMOUNT, TOKEN_NAME, parent_author)
+            print(message_body)
+        except Exception as e:
+            print(f"Failed to transfer token: {e}")
+            return
     else:
         print('[*] Skipping transfer of %f %s from %s to %s' % (TOKEN_GIFT_AMOUNT, TOKEN_NAME, ACCOUNT_NAME, parent_author))
     today = str(date.today())
     today_gift_count = db_count_gifts(today, author_account)
     max_daily_gifts = config['AccessLevel%s' % invoker_level]['MAX_DAILY_GIFTS'] if invoker_level > 0 else 0
     comment_body = comment_success_template.render(token_name=TOKEN_NAME, target_account=parent_author, token_amount=TOKEN_GIFT_AMOUNT, author_account=author_account, today_gift_count=today_gift_count, max_daily_gifts=max_daily_gifts)
-    post_comment(parent_author, comment['permlink'], ACCOUNT_NAME, comment_body)
+    post_comment(parent_author, parent_permlink, ACCOUNT_NAME, comment_body)
 
 if __name__ == '__main__':
+    hive = Hive(nodes=HIVE_API_NODES, keys=[ACCOUNT_ACTIVE_KEY])  # Initialize Hive instance
     main()
