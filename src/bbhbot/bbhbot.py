@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
 '''A script to find and react to BBH commands in comments'''
+
+import hashlib_patch
+import logging
+#logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(filename='log.txt', level=logging.DEBUG, format='%(asctime)s %(message)s')
+
+
 import os
 import jinja2
 import configparser
@@ -12,6 +19,9 @@ from beem import Hive
 from beem.transactionbuilder import TransactionBuilder
 from beembase.operations import Comment
 from beem.account import Account
+from beem.exceptions import MissingKeyError
+from beemgraphenebase.account import PrivateKey
+from beembase.operations import Transfer
 from hiveengine.api import Api
 from hiveengine.wallet import Wallet
 import re
@@ -23,6 +33,7 @@ BLOCK_STATE_FILE_NAME = 'lastblock.txt'
 config = configparser.ConfigParser()
 config.read('bbhbot.config')
 
+
 ENABLE_COMMENTS = config['Global']['ENABLE_COMMENTS'] == 'True'
 ENABLE_TRANSFERS = config['HiveEngine']['ENABLE_TRANSFERS'] == 'True'
 
@@ -33,7 +44,10 @@ HIVE_API_NODES = [
     config['Global']['HIVE_API_NODE'],
     'https://api.hive.blog',
     'https://anyx.io',
-    'https://api.openhive.network'
+    'https://api.openhive.network',
+    'https://api.deathwing.me',
+    'https://hive-api.arcange.eu',
+    'hive-api.3speak.tv'
 ]
 setApi = Api(url="https://api.primersion.com/")
 TOKEN_NAME = config['HiveEngine']['TOKEN_NAME']
@@ -236,7 +250,8 @@ def post_comment(parent_author, parent_permlink, author, comment_body):
             try:
                 tx = TransactionBuilder(blockchain_instance=hive)
                 tx.appendOps(comment_op)
-                tx.appendSigner(ACCOUNT_NAME, 'posting')
+                #tx.appendSigner(ACCOUNT_NAME, 'posting')
+                tx.appendWif(ACCOUNT_POSTING_KEY)
                 tx.sign()
                 tx.broadcast()
                 print(f"Comment posted to {parent_author}/{parent_permlink}")
@@ -374,10 +389,42 @@ def sign_and_broadcast_transaction(custom_json_operation):
         "extensions": []
     }
 
+
+
+
+
     # Sign the transaction
     tx = TransactionBuilder(transaction, hive_instance=hive)
-    tx.appendSigner(ACCOUNT_NAME, 'posting')
-    tx.sign()
+    print('TX:')
+    print(tx)
+    print('++++++++')
+    try:
+        print(f"In Transaction: Account {ACCOUNT_NAME} has a balance of: {account['balance']}")
+        #tx.appendSigner(ACCOUNT_NAME, 'posting')
+        #tx.appendOps(Transfer(custom_json_operation))
+        #tx.appendSigner(ACCOUNT_NAME, "active") # or 
+        tx.appendWif(ACCOUNT_ACTIVE_KEY)
+
+        print('Appendsigner happening...')
+        # Add a delay before signing
+        time.sleep(5)  # 5 seconds delay
+        #tx.sign()
+        try:
+            #tx.sign()
+            signed_tx = tx.sign()
+            print('Transaction signed successfully.')
+            print(signed_tx)
+            print('- - - - -')
+        except MissingKeyError:
+            print("Loaded keys:", hive.wallet.getPublicKeys())
+            print("Missing key error: Ensure the correct key is loaded in the wallet.")
+        except Exception as e:
+            print(f"An error occurred during signing: {e}")
+        print('Transaction signed successfully.')
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        import traceback
+        traceback.print_exc()
 
     for i, node in enumerate(HIVE_API_NODES):
         try:
@@ -412,6 +459,9 @@ def transfer_token(to_account, amount, token_name, memo):
     print('***********')
     # Sign and broadcast the transaction
     response = sign_and_broadcast_transaction(json_data)
+    print('TokenTransferResponse:')
+    print(response)
+    print('***********')
     if response:
         print(f"Transaction broadcasted successfully: {response}")
     else:
@@ -443,7 +493,7 @@ def main():
         set_block_number(comment['block_num'])
 
 def process_comment(comment):
-    print(f"Processing comment in block {comment['block_num']} at {comment.get('timestamp', 'unknown time')}")
+    print(f"Processing comment: Looking for {BOT_COMMAND_STR} in block {comment['block_num']} at {comment.get('timestamp', 'unknown time')}")
     if 'author' not in comment.keys():
         return
     author_account = comment['author']
@@ -523,7 +573,7 @@ def process_comment(comment):
             message_body = 'I sent %f %s to %s' % (TOKEN_GIFT_AMOUNT, TOKEN_NAME, parent_author)
             print(message_body)
         except Exception as e:
-            print(f"Failed to transfer token: {e}")
+            print(f"Failed to transfer token:in process_comment {e} ")
             return
     else:
         print('[*] Skipping transfer of %f %s from %s to %s' % (TOKEN_GIFT_AMOUNT, TOKEN_NAME, ACCOUNT_NAME, parent_author))
@@ -534,5 +584,15 @@ def process_comment(comment):
     post_comment(parent_author, parent_permlink, ACCOUNT_NAME, comment_body)
 
 if __name__ == '__main__':
+    #print('Using key: ')
+    #print(ACCOUNT_ACTIVE_KEY)
     hive = Hive(nodes=HIVE_API_NODES, keys=[ACCOUNT_ACTIVE_KEY])  # Initialize Hive instance
+    
+    print("Loaded keys:", hive.wallet.getPublicKeys())
+    account = Account(ACCOUNT_NAME, blockchain_instance=hive)
+    print(f"Account {ACCOUNT_NAME} has a balance of: {account['balance']}")
+    
+    # Check if the instance is working correctly
+    print("Hive instance initialized successfully.")
+
     main()
