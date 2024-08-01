@@ -28,10 +28,12 @@ import re
 
 ### Global configuration
 
+heartbeat_url = "https://uptime.betterstack.com/api/v1/heartbeat/BCcqsDBriwHoNVGLj44v3vap"
+
 BLOCK_STATE_FILE_NAME = 'lastblock.txt'
 
 config = configparser.ConfigParser()
-config.read('bbhbot.config')
+config.read('../../bbhbot.config')
 
 
 ENABLE_COMMENTS = config['Global']['ENABLE_COMMENTS'] == 'True'
@@ -64,10 +66,34 @@ for section in config.keys():
         print('%s : %s = %s' % (section, key, config[section][key]))
 
 # Markdown templates for comments
-comment_fail_template = jinja2.Template(open(os.path.join('templates', 'comment_fail.template'), 'r').read())
-comment_outofstock_template = jinja2.Template(open(os.path.join('templates', 'comment_outofstock.template'), 'r').read())
-comment_success_template = jinja2.Template(open(os.path.join('templates', 'comment_success.template'), 'r').read())
-comment_daily_limit_template = jinja2.Template(open(os.path.join('templates', 'comment_daily_limit.template'), 'r').read())
+comment_fail_template = jinja2.Template(open(os.path.join('../../templates', 'comment_fail.template'), 'r').read())
+comment_outofstock_template = jinja2.Template(open(os.path.join('../../templates', 'comment_outofstock.template'), 'r').read())
+comment_success_template = jinja2.Template(open(os.path.join('../../templates', 'comment_success.template'), 'r').read())
+comment_daily_limit_template = jinja2.Template(open(os.path.join('../../templates', 'comment_daily_limit.template'), 'r').read())
+
+
+#Betterstack Heartbeat
+def send_heartbeat():
+    try:
+        response = requests.get(heartbeat_url)
+        if response.status_code == 200:
+            print("Heartbeat sent successfully.")
+        else:
+            print(f"Failed to send heartbeat. Status code: {response.status_code}")
+    except requests.exceptions.RequestException as e:
+        print(f"Error sending heartbeat: {e}")
+
+def periodic_heartbeat(interval=300):
+    while True:
+        send_heartbeat()
+        time.sleep(interval)
+
+# Run the heartbeat monitor in the background
+import threading
+heartbeat_thread = threading.Thread(target=periodic_heartbeat)
+heartbeat_thread.daemon = True
+heartbeat_thread.start()
+
 
 ### sqlite3 database helpers
 
@@ -294,6 +320,8 @@ def get_invoker_level(invoker_name):
         invoker_balance = float(wallet_token_info['balance'])
     except:
         invoker_balance = float(0)
+    if invoker_balance >= float(config['AccessLevel5']['MIN_TOKEN_BALANCE']):
+        return 5
     if invoker_balance >= float(config['AccessLevel4']['MIN_TOKEN_BALANCE']):
         return 4
     if invoker_balance >= float(config['AccessLevel3']['MIN_TOKEN_BALANCE']):
@@ -315,7 +343,7 @@ def can_gift(invoker_name, recipient_name):
         return False
     return True
 
-def stream_comments(start_block=None, sleep_duration=3):
+def stream_comments(start_block=None, sleep_duration=2):
     if start_block is None:
         start_block = get_latest_block_num()
     current_block = start_block
@@ -380,8 +408,8 @@ def sign_and_broadcast_transaction(custom_json_operation):
         "operations": [[
             "custom_json",
             {
-                "required_auths": [],
-                "required_posting_auths": [ACCOUNT_NAME],
+                "required_auths": [ACCOUNT_NAME],
+                "required_posting_auths": [],
                 "id": "ssc-mainnet-hive",
                 "json": json.dumps(custom_json_operation)
             }
@@ -492,8 +520,28 @@ def main():
         process_comment(comment)
         set_block_number(comment['block_num'])
 
+def get_comment_timestamp(comment):
+    # Try to get timestamp from comment
+    timestamp = comment.get('timestamp')
+
+    # If timestamp is not found, retrieve it from the block data
+    if not timestamp:
+        block_num = comment.get('block_num')
+        if block_num:
+            block = get_block(block_num)
+            if block and 'timestamp' in block:
+                timestamp = block['timestamp']
+            else:
+                timestamp = 'unknown time'
+        else:
+            timestamp = 'unknown time'
+
+    return timestamp
+
 def process_comment(comment):
-    print(f"Processing comment: Looking for {BOT_COMMAND_STR} in block {comment['block_num']} at {comment.get('timestamp', 'unknown time')}")
+    comment_timestamp = get_comment_timestamp(comment)
+    #print(f"Processing comment at {comment_timestamp}")
+    print(f"Processing comment: Looking for {BOT_COMMAND_STR} in block {comment['block_num']} at {comment_timestamp}")
     if 'author' not in comment.keys():
         return
     author_account = comment['author']
