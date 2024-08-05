@@ -27,9 +27,6 @@ from hiveengine.wallet import Wallet
 import re
 
 ### Global configuration
-
-heartbeat_url = "https://uptime.betterstack.com/api/v1/heartbeat/BCcqsDBriwHoNVGLj44v3vap"
-
 BLOCK_STATE_FILE_NAME = 'lastblock.txt'
 
 config = configparser.ConfigParser()
@@ -38,6 +35,7 @@ config.read('../../bbhbot.config')
 
 ENABLE_COMMENTS = config['Global']['ENABLE_COMMENTS'] == 'True'
 ENABLE_TRANSFERS = config['HiveEngine']['ENABLE_TRANSFERS'] == 'True'
+ENABLE_SELF_TRANSFERS = config['HiveEngine']['ENABLE_SELF_TRANSFERS'] == 'True'
 
 ACCOUNT_NAME = config['Global']['ACCOUNT_NAME']
 ACCOUNT_POSTING_KEY = config['Global']['ACCOUNT_POSTING_KEY']
@@ -51,11 +49,13 @@ HIVE_API_NODES = [
     'https://hive-api.arcange.eu',
     'hive-api.3speak.tv'
 ]
+heartbeat_url = config['Global']['HEARTBEAT']
 setApi = Api(url="https://api.primersion.com/")
 TOKEN_NAME = config['HiveEngine']['TOKEN_NAME']
 BOT_COMMAND_STR = config['Global']['BOT_COMMAND_STR']
 SQLITE_DATABASE_FILE = 'bbhbot.db'
 SQLITE_GIFTS_TABLE = 'bbh_bot_gifts'
+SQLITE_FAULTS_TABLE = 'bit_bot_faults'
 
 ### END Global configuration
 
@@ -70,7 +70,6 @@ comment_fail_template = jinja2.Template(open(os.path.join('../../templates', 'co
 comment_outofstock_template = jinja2.Template(open(os.path.join('../../templates', 'comment_outofstock.template'), 'r').read())
 comment_success_template = jinja2.Template(open(os.path.join('../../templates', 'comment_success.template'), 'r').read())
 comment_daily_limit_template = jinja2.Template(open(os.path.join('../../templates', 'comment_daily_limit.template'), 'r').read())
-
 
 #Betterstack Heartbeat
 def send_heartbeat():
@@ -94,13 +93,13 @@ heartbeat_thread = threading.Thread(target=periodic_heartbeat)
 heartbeat_thread.daemon = True
 heartbeat_thread.start()
 
-
 ### sqlite3 database helpers
 
 def db_create_tables():
     db_conn = sqlite3.connect(SQLITE_DATABASE_FILE)
     c = db_conn.cursor()
     c.execute(f"CREATE TABLE IF NOT EXISTS {SQLITE_GIFTS_TABLE}(date TEXT NOT NULL, invoker TEXT NOT NULL, recipient TEXT NOT NULL, block_num INTEGER NOT NULL);")
+    c.execute(f"CREATE TABLE IF NOT EXISTS {SQLITE_FAULTS_TABLE}(date TEXT NOT NULL, invoker TEXT NOT NULL, block_num INTEGER NOT NULL);")
     db_conn.commit()
     db_conn.close()
 
@@ -111,6 +110,13 @@ def db_save_gift(date, invoker, recipient, block_num):
     db_conn.commit()
     db_conn.close()
 
+def db_save_faults(date, invoker, block_num):
+    db_conn = sqlite3.connect(SQLITE_DATABASE_FILE)
+    c = db_conn.cursor()
+    c.execute(f'INSERT INTO {SQLITE_FAULTS_TABLE} VALUES (?,?,?);', [date, invoker, block_num])
+    db_conn.commit()
+    db_conn.close()
+
 def db_count_gifts(date, invoker):
     db_conn = sqlite3.connect(SQLITE_DATABASE_FILE)
     c = db_conn.cursor()
@@ -118,6 +124,18 @@ def db_count_gifts(date, invoker):
     row = c.fetchone()
     db_conn.commit()
     db_conn.close()
+    return row[0]
+
+def db_count_faults(date, invoker):
+    db_conn = sqlite3.connect(SQLITE_DATABASE_FILE)
+    c = db_conn.cursor()
+    c.execute(f"SELECT count(*) FROM {SQLITE_FAULTS_TABLE} WHERE date = '{date}' AND invoker = '{invoker}';")
+    row = c.fetchone()
+    db_conn.commit()
+    db_conn.close()
+    print('Nr of faults triggered: ')
+    print(row[0])
+    print('$$$$$$$$$$$$$$$$$$$')
     return row[0]
 
 def db_count_gifts_unique(date, invoker, recipient):
@@ -332,11 +350,21 @@ def get_invoker_level(invoker_name):
         return 1
     return 0
 
-def is_block_listed(name):
-    return name in config['HiveEngine']['GIFT_BLOCK_LIST'].split(',')
+def is_send_block_listed(name):
+    if name in config['HiveEngine']['GIFT_SND_BLOCK_LIST'].split(','):
+        print('Is blocklisted: %s', name)
+        print('In blocklist: %s', config['HiveEngine']['GIFT_SND_BLOCK_LIST'])
+        print('------BLOCKED-----')
+    return name in config['HiveEngine']['GIFT_SND_BLOCK_LIST'].split(',')
+
+def is_receive_block_listed(name):
+    return name in config['HiveEngine']['GIFT_REC_BLOCK_LIST'].split(',')
 
 def can_gift(invoker_name, recipient_name):
-    if is_block_listed(invoker_name) or is_block_listed(recipient_name):
+    if is_send_block_listed(invoker_name) or is_receive_block_listed(recipient_name):
+        print('Is blocklisted!')
+        print(invoker_name)
+        print('------BLOCKED-----')
         return False
     level = get_invoker_level(invoker_name)
     if level == 0 or daily_limit_reached(invoker_name, level) or daily_limit_unique_reached(invoker_name, recipient_name, level):
@@ -580,26 +608,34 @@ def process_comment(comment):
         print("We already replied!")
         return
     invoker_level = get_invoker_level(author_account)
-    if is_block_listed(author_account) or is_block_listed(parent_author):
+    if is_send_block_listed(author_account):
         return
     if not can_gift(author_account, parent_author):
+        today = str(date.today())
         print('Invoker doesnt meet minimum requirements')
         min_balance = float(config['AccessLevel1']['MIN_TOKEN_BALANCE'])
-        if invoker_level > 0 and daily_limit_reached(author_account, invoker_level):
+        if invoker_level > 0 and daily_limit_reached(author_account, invoker_level) and db_count_faults(today, author_account) == 0:
             max_daily_gifts = config['AccessLevel%s' % invoker_level]['MAX_DAILY_GIFTS']
             comment_body = comment_daily_limit_template.render(token_name=TOKEN_NAME, target_account=author_account, max_daily_gifts=max_daily_gifts)
             message_body = '%s tried to send %s but reached the daily limit.' % (author_account, TOKEN_NAME)
             print(message_body)
-        elif invoker_level > 0 and daily_limit_unique_reached(author_account, parent_author, invoker_level):
+        elif invoker_level > 0 and daily_limit_unique_reached(author_account, parent_author, invoker_level) and db_count_faults(today, author_account) < 0:
             message_body = '%s tried to send %s but reached the daily limit.' % (author_account, TOKEN_NAME)
             print(message_body)
         else:
-            comment_body = comment_fail_template.render(token_name=TOKEN_NAME, target_account=author_account, min_balance=min_balance)
-            message_body = '%s tried to send %s but didnt meet requirements.' % (author_account, TOKEN_NAME)
-            post_comment(parent_author, parent_permlink, ACCOUNT_NAME, comment_body)
-            print(message_body)
+            if  db_count_faults(today, author_account) == 0:
+                comment_body = comment_fail_template.render(token_name=TOKEN_NAME, target_account=author_account, min_balance=min_balance)
+                message_body = '%s tried to send %s but didnt meet requirements.' % (author_account, TOKEN_NAME)
+                post_comment(parent_author, parent_permlink, ACCOUNT_NAME, comment_body)
+                db_save_faults(today, author_account, comment['block_num'])
+                print(message_body)
+            else:
+                print('User has too many faults: %s', db_count_faults(today, author_account))
+                print('FFFFFFFFFFFFFFFF')
+                db_save_faults(today, author_account, comment['block_num'])
         return
     TOKEN_GIFT_AMOUNT = float(config['HiveEngine']['TOKEN_GIFT_AMOUNT'])
+    TOKEN_SELF_GIFT_AMOUNT = float(config['HiveEngine']['TOKEN_SELF_GIFT_AMOUNT'])
     bot_wallet = Wallet(ACCOUNT_NAME, api=setApi)
     bot_token_info = bot_wallet.get_token(TOKEN_NAME)
     if bot_token_info is None or 'balance' not in bot_token_info:
@@ -616,6 +652,8 @@ def process_comment(comment):
         print('[*] Transfering %f %s from %s to %s' % (TOKEN_GIFT_AMOUNT, TOKEN_NAME, ACCOUNT_NAME, parent_author))
         try:
             transfer_token(parent_author, TOKEN_GIFT_AMOUNT, TOKEN_NAME, memo=config['HiveEngine']['TRANSFER_MEMO'])
+            if ENABLE_SELF_TRANSFERS:
+                transfer_token(author_account, TOKEN_SELF_GIFT_AMOUNT, TOKEN_NAME, memo=config['HiveEngine']['TRANSFER_SELF_MEMO'])        
             today = str(date.today())
             db_save_gift(today, author_account, parent_author, comment['block_num'])
             message_body = 'I sent %f %s to %s' % (TOKEN_GIFT_AMOUNT, TOKEN_NAME, parent_author)
