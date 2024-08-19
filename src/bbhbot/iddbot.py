@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-'''A script to find and react to BBH commands in comments'''
+'''A script to find and react to bot commands in comments'''
 
 import hashlib_patch
 import logging
@@ -30,24 +30,26 @@ import re
 BLOCK_STATE_FILE_NAME = 'lastblock.txt'
 
 config = configparser.ConfigParser()
-config.read('../../bbhbot.config')
+config.read('../../dabot.config')
 
 
 ENABLE_COMMENTS = config['Global']['ENABLE_COMMENTS'] == 'True'
+ENABLE_FAULT_COMMENTS = config['Global']['ENABLE_FAULT_COMMENTS'] == 'True'
 ENABLE_TRANSFERS = config['HiveEngine']['ENABLE_TRANSFERS'] == 'True'
 ENABLE_SELF_TRANSFERS = config['HiveEngine']['ENABLE_SELF_TRANSFERS'] == 'True'
+ENABLE_UPVOTE =  config['HiveEngine']['ENABLE_UPVOTE'] == 'True'
 
 ACCOUNT_NAME = config['Global']['ACCOUNT_NAME']
 ACCOUNT_POSTING_KEY = config['Global']['ACCOUNT_POSTING_KEY']
 ACCOUNT_ACTIVE_KEY = config['Global']['ACCOUNT_ACTIVE_KEY']
 HIVE_API_NODES = [
-    config['Global']['HIVE_API_NODE'],
+    'https://api.deathwing.me',
+    'https://hive-api.arcange.eu',
     'https://api.hive.blog',
     'https://anyx.io',
     'https://api.openhive.network',
-    'https://api.deathwing.me',
-    'https://hive-api.arcange.eu',
-    'hive-api.3speak.tv'
+    'hive-api.3speak.tv',
+    config['Global']['HIVE_API_NODE']
 ]
 heartbeat_url = config['Global']['HEARTBEAT']
 setApi = Api(url="https://api.primersion.com/")
@@ -180,11 +182,17 @@ def get_block(block_num):
                 "id": 1
             })
             response.raise_for_status()
-            result = response.json()
-            if 'result' in result:
-                return result['result']
-            else:
-                print(f"Unexpected response structure from {node} for block {block_num}: {result}")
+            try:
+                result = response.json()
+                if 'result' in result:
+                    return result['result']
+                else:
+                    print(f"Unexpected response structure from {node} for block {block_num}: {result}")
+            except json.JSONDecodeError as e:
+                print(f"Failed to decode JSON from {node} for block {block_num}. Error: {e}")
+                print(f"Response content: {response.content}")
+                # Implement a retry mechanism here if needed
+                time.sleep(1)  # Sleep before retrying
         except requests.exceptions.RequestException as e:
             print(f"Failed to get block {block_num} from {node}: {e}")
     return None
@@ -271,6 +279,27 @@ def generate_valid_permlink(permlink):
     permlink = re.sub(r'[^a-z0-9-]', '-', permlink)
     return permlink
 
+def upvote_author_of_comment(hive_username, comment_permlink, comment_author):
+    
+    # Get the comment using the permlink and author
+    comment = Comment(authorperm=f"@{comment_author}/{comment_permlink}")
+    
+    # Get the parent of the comment
+    parent_author = comment.parent_author
+    parent_permlink = comment.parent_permlink
+    
+    if parent_author:
+        # Load the parent comment or post
+        parent_comment = Comment(authorperm=f"@{parent_author}/{parent_permlink}")
+        
+        # Perform the upvote
+        parent_comment.upvote(voter=hive_username)
+        
+        return f"Upvoted {parent_author}'s post/comment with permlink: {parent_permlink}"
+    else:
+        return "The parent post/comment does not exist or has been deleted."
+
+
 def post_comment(parent_author, parent_permlink, author, comment_body):
     if ENABLE_COMMENTS:
         print('Commenting!')
@@ -338,17 +367,30 @@ def get_invoker_level(invoker_name):
         invoker_balance = float(wallet_token_info['balance'])
     except:
         invoker_balance = float(0)
-    if invoker_balance >= float(config['AccessLevel5']['MIN_TOKEN_BALANCE']):
-        return 5
-    if invoker_balance >= float(config['AccessLevel4']['MIN_TOKEN_BALANCE']):
-        return 4
-    if invoker_balance >= float(config['AccessLevel3']['MIN_TOKEN_BALANCE']):
-        return 3
-    if invoker_balance >= float(config['AccessLevel2']['MIN_TOKEN_BALANCE']):
-        return 2
-    if invoker_balance >= float(config['AccessLevel1']['MIN_TOKEN_BALANCE']):
-        return 1
-    return 0
+
+    # Initialize the default level to 0
+    invoker_level = 0
+
+    # Loop through all sections in the config file
+    for section in config.sections():
+        if section.startswith('AccessLevel'):
+            try:
+                # Get the minimum balance required for the current access level
+                min_balance = float(config[section]['MIN_TOKEN_BALANCE'])
+                
+                # If the invoker's balance is greater than or equal to the required minimum balance
+                if invoker_balance >= min_balance:
+                    # Extract the level number from the section name (e.g., "AccessLevel4" -> 4)
+                    level = int(section.replace('AccessLevel', ''))
+                    
+                    # Update the invoker level if this level is higher than the current one
+                    invoker_level = max(invoker_level, level)
+            except KeyError:
+                # Handle the case where the MIN_TOKEN_BALANCE key might be missing
+                pass
+
+    return invoker_level
+
 
 def is_send_block_listed(name):
     if name in config['HiveEngine']['GIFT_SND_BLOCK_LIST'].split(','):
@@ -371,24 +413,48 @@ def can_gift(invoker_name, recipient_name):
         return False
     return True
 
-def stream_comments(start_block=None, sleep_duration=2):
+def stream_comments(start_block=None, sleep_duration=2.4):
+    polling_interval = 0.1  # Start with a very short interval, e.g., 100ms
+    missed_blocks = 0
+    
     if start_block is None:
-        start_block = get_latest_block_num()
-    current_block = start_block
+                start_block = get_latest_block_num()
+    current_block = start_block 
+
     while True:
-        block = get_block(current_block)
-        if not block:
-            print(f"Block {current_block} not found, retrying...")
-            time.sleep(3)
-            continue
-        for tx in block.get('transactions', []):
-            for op in tx.get('operations', []):
-                if op[0] == 'comment':
-                    comment = op[1]
-                    comment['block_num'] = current_block
-                    yield comment
-        current_block += 1
-        time.sleep(sleep_duration)
+        try:               
+            block = get_block(current_block)
+            if block:
+                #print(f"CheckingBlock: {current_block}")
+                # Process the block
+                for tx in block.get('transactions', []):
+                    for op in tx.get('operations', []):
+                        if op[0] == 'comment':
+                            comment = op[1]
+                            comment['block_num'] = current_block
+                            yield comment
+                #print(f"PreBlock: {current_block}")
+                current_block += 1
+                #print(f"PostBlock: {current_block}")
+                # Reset missed block counter and polling interval
+                missed_blocks = 0
+                polling_interval = 0.1  # Return to the short polling interval
+            else:
+                # If no block is found, increment missed block counter
+                missed_blocks += 1
+
+                # Increase polling interval if blocks are consistently not found
+                if missed_blocks >= 5:  # After 5 misses, increase interval
+                    polling_interval = min(polling_interval + 0.1, 2.6)  # Cap interval at 2s
+            #print(f"Sleeping for {polling_interval} seconds!")
+
+        except Exception as e:
+            # Handle any other exceptions that might occur
+            print(f"Error encountered: {e}")
+
+        # Sleep for the current polling interval before trying again
+        time.sleep(polling_interval)
+        
 
 def fetch_ref_block_data():
     for node in HIVE_API_NODES:
@@ -567,9 +633,18 @@ def get_comment_timestamp(comment):
     return timestamp
 
 def process_comment(comment):
-    comment_timestamp = get_comment_timestamp(comment)
-    #print(f"Processing comment at {comment_timestamp}")
-    print(f"Processing comment: Looking for {BOT_COMMAND_STR} in block {comment['block_num']} at {comment_timestamp}")
+
+    comment_timestamp_str = get_comment_timestamp(comment)
+    if comment_timestamp_str != 'unknown time':
+        comment_timestamp = datetime.strptime(comment_timestamp_str, "%Y-%m-%dT%H:%M:%S")
+        current_timestamp = datetime.utcnow()  # Current time in UTC
+        time_difference = current_timestamp - comment_timestamp
+
+        print(f"Processing comment: Looking for {BOT_COMMAND_STR} in block {comment['block_num']} at {comment_timestamp} (Current time: {current_timestamp}, Delay: {time_difference})")
+    else:
+        print(f"Processing comment: Looking for {BOT_COMMAND_STR} in block {comment['block_num']} at unknown time")
+    
+    
     if 'author' not in comment.keys():
         return
     author_account = comment['author']
@@ -626,7 +701,8 @@ def process_comment(comment):
             if  db_count_faults(today, author_account) == 0:
                 comment_body = comment_fail_template.render(token_name=TOKEN_NAME, target_account=author_account, min_balance=min_balance)
                 message_body = '%s tried to send %s but didnt meet requirements.' % (author_account, TOKEN_NAME)
-                post_comment(parent_author, parent_permlink, ACCOUNT_NAME, comment_body)
+                if ENABLE_FAULT_COMMENTS:
+                    post_comment(parent_author, parent_permlink, ACCOUNT_NAME, comment_body)
                 db_save_faults(today, author_account, comment['block_num'])
                 print(message_body)
             else:
@@ -668,6 +744,10 @@ def process_comment(comment):
     max_daily_gifts = config['AccessLevel%s' % invoker_level]['MAX_DAILY_GIFTS'] if invoker_level > 0 else 0
     comment_body = comment_success_template.render(token_name=TOKEN_NAME, target_account=parent_author, token_amount=TOKEN_GIFT_AMOUNT, author_account=author_account, today_gift_count=today_gift_count, max_daily_gifts=max_daily_gifts)
     post_comment(parent_author, parent_permlink, ACCOUNT_NAME, comment_body)
+    if ENABLE_UPVOTE:
+        response = upvote_author_of_comment(ACCOUNT_NAME, parent_permlink, parent_author)
+        print(response)
+
 
 if __name__ == '__main__':
     #print('Using key: ')
