@@ -656,8 +656,12 @@ def process_comment(comment):
         return
     if parent_author == ACCOUNT_NAME:
         message_body = '%s replied with: %s' % (author_account, comment['body'])
-    if BOT_COMMAND_STR not in comment['body']:
+    #now start checking for the commands!
+    bot_commands = [cmd.strip() for cmd in BOT_COMMAND_STR.split(',')]
+    if not any(cmd in comment['body'] for cmd in bot_commands):
         return
+    #if BOT_COMMAND_STR not in comment['body']:
+    #    return
     else:
         debug_message = 'Found %s command: https://peakd.com/%s in block %s' % (BOT_COMMAND_STR, reply_identifier, comment['block_num'])
         print(debug_message)
