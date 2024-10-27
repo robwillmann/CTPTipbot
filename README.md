@@ -11,9 +11,9 @@ sudo apt-get install python3-pip build-essential libssl-dev python3-dev python3-
 
 ### Install Python Packages
 
-Install bbhbot by (you may need to replace pip3 by pip):
+Install ctpbot via pip3:
 ```
-sudo pip3 install -U bbhbot beem hiveengine
+sudo pip3 install -U ctpbot beem hiveengine
 ```
 
 ## Configure And Run BBHbot
@@ -21,7 +21,7 @@ sudo pip3 install -U bbhbot beem hiveengine
 First clone the Github repository to your home directory:
 ```
 cd ~
-git clone https://github.com/flaxz/bbhbot
+git clone https://github.com/robwillmann/ctptipbot
 ```
 
 After that edit your comment templates using Nano, if you want to change anything, there are 4 comment templates.
