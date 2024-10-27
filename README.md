@@ -1,8 +1,6 @@
-# BBHbot
+# CTP Tipping bot
 
-A script to find and react to !BBH commands in comments on the Hive blockchain.
-
-*Please note that this software is in early Beta stage, and that you need to know what you are doing to use it.*
+A script to find and react to !CTP commands in comments on the Hive blockchain.
 
 ## Installation 
 
